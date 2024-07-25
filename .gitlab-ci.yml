@@ -1,0 +1,62 @@
+
+stages:
+  - sonar
+  - build
+
+variables:
+  PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PACKAGE_ID}/packages/generic/${CI_PROJECT_NAME}"
+  PACKAGE_REGISTRY_URL_VERSION: "${CI_API_V4_URL}/projects/${CI_PACKAGE_ID}/packages?package_name=${CI_PROJECT_NAME}&order_by=version&sort=desc"
+sonar:
+  stage: sonar
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script: 
+    - sonar-scanner
+  allow_failure: true
+  
+build:
+  stage: build
+  image: debian:latest
+  script:
+    - apt-get update
+    - apt-get install -y zip
+    - apt-get install -y curl
+    - apt-get install -y jq
+    - echo ${PACKAGE_REGISTRY_URL_VERSION}
+    - VERSION=$(cat version)
+    - |
+      RESPONSE_VERSION=$(curl --header "PRIVATE-TOKEN: ${CI_TOKEN_DEPLOY}"  ${PACKAGE_REGISTRY_URL_VERSION})
+    - echo $RESPONSE_VERSION
+    - |
+      if echo "$RESPONSE_VERSION" | grep -q "404"; then
+        VAR_VERSION=$(cat version)
+      else
+        VAR_VERSION=$(jq -r ".[0].version" <<< "${RESPONSE_VERSION}")
+      fi
+    
+    - echo ${VAR_VERSION}| awk -F. -v OFS=. 'NF==1{print ++$NF}; NF>1{if(length($NF+1)>length($NF))$(NF-1)++; $NF=sprintf("%0*d", length($NF), ($NF+1)%(10^length($NF))); print}'
+    
+    - NEXTVERSION=$(echo ${VAR_VERSION} | awk -F. -v OFS=. 'NF==1{print ++$NF}; NF>1{if(length($NF+1)>length($NF))$(NF-1)++; $NF=sprintf("%0*d", length($NF), ($NF+1)%(10^length($NF))); print}')
+    
+    - echo $NEXTVERSION
+    - if [ "${NEXTVERSION}" = "1" ];then NEXTVERSION="$VERSION"; fi
+    - PACKAGEVERSION="${CI_PROJECT_NAME}-$NEXTVERSION"
+    - zip -r $PACKAGEVERSION.zip ./ -x '*.git*'
+    - echo ${PACKAGE_REGISTRY_URL}/$NEXTVERSION/$PACKAGEVERSION.zip
+    - echo ${CI_JOB_TOKEN}
+    - echo $PACKAGEVERSION
+    - |
+      RESPONSE=$(curl --header "PRIVATE-TOKEN: ${CI_TOKEN_DEPLOY}" --upload-file $PACKAGEVERSION.zip ${PACKAGE_REGISTRY_URL}/$NEXTVERSION/$PACKAGEVERSION.zip) 
+    - echo $RESPONSE
+    - VAR=$(jq -r ".message" <<< "${RESPONSE}")
+    - if [[ "$VAR" == *"201"* ]];then echo "Criado com sucesso";else exit 64; fi
+  only:
+    - main  
